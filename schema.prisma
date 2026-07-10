@@ -1,0 +1,294 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// Enums
+// ==========================================
+
+enum EntityType {
+  COMPANY
+  SUPPLIER
+  MAKER
+}
+
+enum ItemType {
+  RAW_MATERIAL
+  FINISHED_GOOD
+}
+
+enum UnitOfMeasurement {
+  LBS
+  PCS
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum LocationType {
+  MAIN_WAREHOUSE
+  MAKER_WIP
+}
+
+// ==========================================
+// Master Data Models
+// ==========================================
+
+model Entity {
+  id        String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String     @db.VarChar(255)
+  type      EntityType
+  email     String?    @db.VarChar(255)
+  phone     String?    @db.VarChar(50)
+  address   String?    @db.Text
+  ntnNumber String?    @db.VarChar(100)
+  strnNumber String?   @db.VarChar(100)
+  createdAt DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  locations        Location[]        @relation("MakerLocations") // For Maker WIP tracking
+  purchaseInvoices PurchaseInvoice[] // If Supplier
+  salesInvoices    SalesInvoice[]    // If Company
+
+  @@index([type])
+}
+
+model InventoryItem {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sku         String            @db.VarChar(100)
+  name        String            @db.VarChar(255)
+  type        ItemType
+  unit        UnitOfMeasurement
+  description String?           @db.Text
+  createdAt   DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime          @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  inventoryMovements   InventoryLedger[]
+  purchaseLines        PurchaseLine[]
+  salesLines           SalesLine[]
+
+  @@index([type])
+}
+
+model Location {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String       @db.VarChar(255)
+  type      LocationType
+  entityId  String?      @db.Uuid // Nullable: only filled if type is MAKER_WIP to reference the Maker
+  createdAt DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  entity            Entity?           @relation("MakerLocations", fields: [entityId], references: [id], onDelete: Cascade)
+  incomingMovements InventoryLedger[] @relation("ToLocation")
+  outgoingMovements InventoryLedger[] @relation("FromLocation")
+
+  @@unique([type, entityId]) // A maker should only have one WIP location
+  @@index([type])
+}
+
+// ==========================================
+// Chart of Accounts (COA) Model
+// ==========================================
+
+model ChartOfAccounts {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code        String    @unique @db.VarChar(50) // e.g. 1000 for cash, 2100 for AP
+  name        String    @db.VarChar(150)
+  type        AccountType
+  description String?   @db.Text
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(6)
+  ledgerLines FinancialLedger[]
+}
+
+// ==========================================
+// Document / Business Transaction Models
+// ==========================================
+
+model PurchaseInvoice {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceNumber String   @unique @db.VarChar(100)
+  supplierId    String   @db.Uuid
+  invoiceDate   DateTime @db.Date
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  supplier             Entity                @relation(fields: [supplierId], references: [id])
+  lines                PurchaseLine[]
+  financialTransaction FinancialTransaction? @relation("PurchaseFinancialTx")
+
+  @@index([supplierId])
+}
+
+model PurchaseLine {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  purchaseInvoiceId String   @db.Uuid
+  itemId            String   @db.Uuid
+  quantity          Decimal  @db.Decimal(18, 4) // Yarn in lbs
+  unitPrice         Decimal  @db.Decimal(18, 4)
+  totalPrice        Decimal  @db.Decimal(18, 4)
+  createdAt         DateTime @default(now()) @db.Timestamptz(6)
+
+  // Relations
+  purchaseInvoice PurchaseInvoice   @relation(fields: [purchaseInvoiceId], references: [id], onDelete: Cascade)
+  item            InventoryItem     @relation(fields: [itemId], references: [id])
+  inventoryLedger InventoryLedger[]
+
+  @@index([purchaseInvoiceId])
+  @@index([itemId])
+}
+
+model SalesInvoice {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceNumber String   @unique @db.VarChar(100)
+  customerId    String   @db.Uuid
+  invoiceDate   DateTime @db.Date
+  poNumber      String?  @db.VarChar(100)
+  jobNumber     String?  @db.VarChar(100)
+  paymentTerms  String?  @db.VarChar(100)
+  shippingMethod String? @db.VarChar(100)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  customer             Entity                @relation(fields: [customerId], references: [id])
+  lines                SalesLine[]
+  financialTransaction FinancialTransaction? @relation("SalesFinancialTx")
+
+  @@index([customerId])
+}
+
+model SalesLine {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  salesInvoiceId String   @db.Uuid
+  itemId         String   @db.Uuid
+  quantity       Decimal  @db.Decimal(18, 4) // Shirts in pieces
+  unitPrice      Decimal  @db.Decimal(18, 4)
+  totalPrice     Decimal  @db.Decimal(18, 4)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  // Relations
+  salesInvoice    SalesInvoice      @relation(fields: [salesInvoiceId], references: [id], onDelete: Cascade)
+  item            InventoryItem     @relation(fields: [itemId], references: [id])
+  inventoryLedger InventoryLedger[]
+
+  @@index([salesInvoiceId])
+  @@index([itemId])
+}
+
+// ==========================================
+// Ledger Models (Physical & Financial)
+// ==========================================
+
+model InventoryLedger {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId        String   @db.Uuid
+  fromLocationId String?  @db.Uuid // Nullable: purchase adds inventory with no source
+  toLocationId   String?  @db.Uuid // Nullable: sales/write-offs remove inventory with no destination
+  quantity      Decimal  @db.Decimal(18, 4)
+  transactionAt DateTime @default(now()) @db.Timestamptz(6)
+
+  // Document anchors (audit trail)
+  purchaseLineId       String? @db.Uuid
+  salesLineId          String? @db.Uuid
+
+  // Relations
+  item               InventoryItem       @relation(fields: [itemId], references: [id])
+  fromLocation       Location?           @relation("FromLocation", fields: [fromLocationId], references: [id])
+  toLocation         Location?           @relation("ToLocation", fields: [toLocationId], references: [id])
+  purchaseLine       PurchaseLine?       @relation(fields: [purchaseLineId], references: [id])
+  salesLine          SalesLine?          @relation(fields: [salesLineId], references: [id])
+
+  @@index([itemId])
+  @@index([fromLocationId])
+  @@index([toLocationId])
+}
+
+model FinancialTransaction {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  description String   @db.VarChar(255)
+  reference   String?  @db.VarChar(100) // Reference doc ID or description
+  postedAt    DateTime @default(now()) @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  // Document anchors
+  purchaseInvoiceId String? @unique @db.Uuid
+  salesInvoiceId    String? @unique @db.Uuid
+
+  // Relations
+  lines           FinancialLedger[]
+  purchaseInvoice PurchaseInvoice? @relation("PurchaseFinancialTx", fields: [purchaseInvoiceId], references: [id])
+  salesInvoice    SalesInvoice?    @relation("SalesFinancialTx", fields: [salesInvoiceId], references: [id])
+  expense         Expense?         @relation("ExpenseFinancialTx")
+}
+
+model FinancialLedger {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  transactionId String   @db.Uuid
+  accountId     String   @db.Uuid
+  debit         Decimal  @db.Decimal(18, 4) @default(0.0000)
+  credit        Decimal  @db.Decimal(18, 4) @default(0.0000)
+  createdAt     DateTime @default(now()) @db.Timestamptz(6)
+  orderNumber   String?  @db.VarChar(100) // Simple manually-tagged order number
+
+  // Relations
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  account     ChartOfAccounts      @relation(fields: [accountId], references: [id])
+
+  @@index([transactionId])
+  @@index([accountId])
+}
+
+enum ActivityType {
+  PROCUREMENT
+  MAKER_TRANSFER
+  GOODS_RECEIVED
+  INVOICE_GENERATED
+  PAYMENT_RECORDED
+  EXPENSE_RECORDED
+}
+
+model ActivityLog {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timestamp   DateTime     @default(now()) @db.Timestamptz(6)
+  actionType  ActivityType
+  description String       @db.Text
+  orderNumber String?      @db.VarChar(100) // Simple manually-tagged order number
+}
+
+model ExpenseCategory {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String    @unique @db.VarChar(255)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  expenses  Expense[]
+}
+
+model Expense {
+  id                     String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId             String                @db.Uuid
+  amount                 Decimal               @db.Decimal(18, 4)
+  description            String?               @db.Text
+  expenseDate            DateTime              @db.Date
+  createdAt              DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime              @updatedAt @db.Timestamptz(6)
+  financialTransactionId String?               @unique @db.Uuid
+  category               ExpenseCategory       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  financialTransaction   FinancialTransaction? @relation("ExpenseFinancialTx", fields: [financialTransactionId], references: [id], onDelete: Cascade)
+
+  @@index([categoryId])
+}
