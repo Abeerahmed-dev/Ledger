@@ -3,27 +3,20 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { dashboardNavItems } from './nav-items';
+import { DashboardMobileNav } from './DashboardMobileNav';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
-  const tabs = [
-    { name: 'Overview (Jaiza)', href: '/dashboard' },
-    { name: 'Suppliers (Sootar Walay)', href: '/dashboard/suppliers' },
-    { name: 'Makers (Karkhana)', href: '/dashboard/makers' },
-    { name: 'Companies (Party)', href: '/dashboard/companies' },
-    { name: "Owner's Net Worth (Asal Maaliat)", href: '/dashboard/reality' },
-    { name: 'Daily Expenses (Rozana Kharcha)', href: '/dashboard/expenses' },
-    { name: 'Settings (Master Data)', href: '/dashboard/settings' },
-    { name: 'History (Pichla Record)', href: '/dashboard/history' },
-  ];
-
   return (
     <div className="flex flex-col min-h-screen">
-      {/* Sub Navigation Bar */}
-      <div className="bg-white border-b border-slate-200 sticky top-0 z-30 flex items-center h-14 px-4 overflow-x-auto scrollbar-none">
+      <DashboardMobileNav />
+
+      {/* Sub Navigation Bar — desktop only, unchanged */}
+      <div className="hidden md:flex bg-white border-b border-slate-200 sticky top-0 z-30 items-center h-14 px-4 overflow-x-auto scrollbar-none">
         <div className="flex space-x-8 overflow-x-auto scrollbar-none shrink-0 h-14">
-          {tabs.map((tab) => {
+          {dashboardNavItems.map((tab) => {
             const isActive = pathname === tab.href;
             return (
               <Link
