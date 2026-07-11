@@ -43,6 +43,12 @@ interface Props {
   jobNumbers: string[];
   transactionCards: TransactionCard[];
   pagination: PaginationMeta;
+  metrics: {
+    totalBilled: number;
+    totalPaid: number;
+    advancePaid: number;
+    remaining: number;
+  };
   filters: {
     companyId: string;
     jwoNumber: string;
@@ -50,7 +56,7 @@ interface Props {
   };
 }
 
-export function CompanyTable({ companies, jobNumbers, transactionCards, pagination, filters }: Props) {
+export function CompanyTable({ companies, jobNumbers, transactionCards, pagination, metrics, filters }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const [showFilters, setShowFilters] = useState(false);
@@ -241,27 +247,56 @@ export function CompanyTable({ companies, jobNumbers, transactionCards, paginati
         </div>
       )}
 
-      {/* Dynamic Summary Bar */}
-      <div className="bg-slate-950 text-white rounded-[32px] p-6 shadow-md border-2 border-slate-900 space-y-4">
-        <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block font-sans">Live Sales Summary</span>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 divide-y sm:divide-y-0 sm:divide-x divide-slate-800">
-          <div className="pt-2 sm:pt-0 sm:px-2">
-            <span className="block text-[10px] text-slate-400 font-bold uppercase">Total Shirts Sold</span>
-            <span className="text-xl sm:text-2xl font-black text-slate-100 mt-1 block">{totalShirtsSold.toLocaleString()} Pcs</span>
+      {/* 4-Pillar Ledger UI */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Card 1: Total Billed */}
+        <div className="bg-white border-2 border-slate-200 rounded-[28px] p-5 shadow-sm space-y-1">
+          <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider font-sans">Total Billed (Kul Bill)</span>
+          <span className="block text-xl font-black text-slate-900">{formatPKR(metrics.totalBilled)}</span>
+          <span className="text-[9px] text-slate-400 font-medium">Sales invoices generated</span>
+        </div>
+
+        {/* Card 2: Total Paid */}
+        <div className="bg-white border-2 border-slate-200 rounded-[28px] p-5 shadow-sm space-y-1">
+          <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">Total Paid (Adaigi)</span>
+          <span className="block text-xl font-black text-slate-900">{formatPKR(metrics.totalPaid)}</span>
+          <span className="text-[9px] text-slate-400 font-medium">Received cash payments</span>
+        </div>
+
+        {/* Card 3: Advance Paid */}
+        <div className="bg-white border-2 border-slate-200 rounded-[28px] p-5 shadow-sm space-y-1 flex flex-col justify-between">
+          <div>
+            <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">Advance Paid (Peshgi)</span>
+            <div className={`flex items-center gap-1 mt-1 text-xl font-black ${
+              metrics.advancePaid > 0 ? 'text-rose-600' : 'text-slate-900'
+            }`}>
+              {metrics.advancePaid > 0 && (
+                <svg className="w-5 h-5 text-rose-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 13l-7 7-7-7m14-6l-7 7-7-7" />
+                </svg>
+              )}
+              <span>{formatPKR(metrics.advancePaid)}</span>
+            </div>
           </div>
-          <div className="pt-4 sm:pt-0 sm:px-4 flex flex-col justify-between">
-            <div>
-              <span className="block text-[10px] text-slate-400 font-bold uppercase">Total Rupees (with GST)</span>
-              {/* Receivables are owed to the business -> strict Green text & upward arrow */}
-              <div className="flex items-center gap-1.5 text-emerald-500 font-black text-xl sm:text-2xl mt-1">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+          <span className="text-[9px] text-slate-400 font-medium">Customer prepayments</span>
+        </div>
+
+        {/* Card 4: Remaining (Baqaya) */}
+        <div className="bg-white border-2 border-slate-200 rounded-[28px] p-5 shadow-sm space-y-1 flex flex-col justify-between">
+          <div>
+            <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">Remaining (Baqaya)</span>
+            <div className={`flex items-center gap-1 mt-1 text-xl font-black ${
+              metrics.remaining > 0 ? 'text-emerald-600' : 'text-slate-900'
+            }`}>
+              {metrics.remaining > 0 && (
+                <svg className="w-5 h-5 text-emerald-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 11l7-7 7 7M5 19l7-7 7 7" />
                 </svg>
-                <span>{formatPKR(totalRupees)}</span>
-              </div>
+              )}
+              <span>{formatPKR(metrics.remaining)}</span>
             </div>
-            <span className="text-[10px] text-emerald-400 font-extrabold font-sans">Paisa Lena Hai (To Receive)</span>
           </div>
+          <span className="text-[9px] text-slate-400 font-medium">Net balance receivable</span>
         </div>
       </div>
 

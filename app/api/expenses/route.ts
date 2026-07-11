@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma, PRISMA_TRANSACTION_OPTIONS } from '../../../db';
+import { revalidatePath } from 'next/cache';
 import {
   buildPaginationMeta,
   DEFAULT_PAGE_SIZE,
@@ -113,6 +114,8 @@ export async function POST(req: Request) {
 
       return expense;
     }, PRISMA_TRANSACTION_OPTIONS);
+
+    revalidatePath('/dashboard/expenses');
 
     return NextResponse.json(result);
   } catch (error: any) {

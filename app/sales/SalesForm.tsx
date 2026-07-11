@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { useRouter } from 'next/navigation';
 
 const schema = z.object({
   companyId: z.string().uuid('Please select a valid company/customer'),
@@ -24,6 +25,7 @@ interface Props {
 }
 
 export function SalesForm({ companies, items }: Props) {
+  const router = useRouter();
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -131,6 +133,7 @@ export function SalesForm({ companies, items }: Props) {
 
       reset();
       setStep(1);
+      router.refresh();
     } catch (err: any) {
       console.error(err);
       setFeedback({

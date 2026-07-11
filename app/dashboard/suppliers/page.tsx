@@ -33,6 +33,12 @@ export default async function SupplierLedgerPage({ searchParams }: PageProps) {
   let yarnItems: any[] = [];
   let transactionCards: any[] = [];
   let pagination = paginateArray([], page, DEFAULT_PAGE_SIZE).meta;
+  let metrics = {
+    totalBilled: 0,
+    totalPaid: 0,
+    advancePaid: 0,
+    remaining: 0,
+  };
 
   try {
     // 1. Fetch suppliers and items for dropdowns
@@ -69,7 +75,10 @@ export default async function SupplierLedgerPage({ searchParams }: PageProps) {
     const payments = await prisma.financialTransaction.findMany({
       where: {
         description: {
-          startsWith: 'Outbound Payment to',
+          startsWith: 'Outbound Payment',
+        },
+        reference: supplierId ? supplierId : {
+          in: suppliersList.map((s) => s.id),
         },
       },
       include: {
@@ -139,6 +148,72 @@ export default async function SupplierLedgerPage({ searchParams }: PageProps) {
       allCards = allCards.filter((c) => c.date <= endDate);
     }
 
+    // Calculate the 4 metrics via Prisma aggregations for the selected Supplier
+    const apAccount = await prisma.chartOfAccounts.findUnique({
+      where: { code: '2100' },
+    });
+    const advanceAccount = await prisma.chartOfAccounts.findUnique({
+      where: { code: '1300' },
+    });
+
+    if (apAccount) {
+      const billedSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: apAccount.id,
+          credit: { gt: 0 },
+          transaction: supplierId ? { reference: supplierId } : {
+            reference: { in: suppliersList.map((s) => s.id) }
+          },
+        },
+        _sum: { credit: true },
+      });
+      metrics.totalBilled = billedSum._sum.credit ? Number(billedSum._sum.credit) : 0;
+
+      const paidSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: apAccount.id,
+          debit: { gt: 0 },
+          transaction: {
+            reference: supplierId ? supplierId : { in: suppliersList.map((s) => s.id) },
+            description: { startsWith: 'Outbound Payment' },
+          },
+        },
+        _sum: { debit: true },
+      });
+      metrics.totalPaid = paidSum._sum.debit ? Number(paidSum._sum.debit) : 0;
+    }
+
+    if (advanceAccount) {
+      const advSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          transaction: supplierId ? { reference: supplierId } : {
+            reference: { in: suppliersList.map((s) => s.id) }
+          },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+      const credit = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+      metrics.advancePaid = Math.max(0, debit - credit);
+
+      const consumedSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          credit: { gt: 0 },
+          transaction: supplierId ? { reference: supplierId } : {
+            reference: { in: suppliersList.map((s) => s.id) }
+          },
+        },
+        _sum: { credit: true },
+      });
+      const consumedAdvances = consumedSum._sum.credit ? Number(consumedSum._sum.credit) : 0;
+
+      metrics.remaining = Math.max(0, (metrics.totalBilled - metrics.totalPaid) - consumedAdvances);
+    } else {
+      metrics.remaining = Math.max(0, metrics.totalBilled - metrics.totalPaid);
+    }
+
     const paged = paginateArray(allCards, page, DEFAULT_PAGE_SIZE);
     transactionCards = paged.items;
     pagination = paged.meta;
@@ -182,6 +257,7 @@ export default async function SupplierLedgerPage({ searchParams }: PageProps) {
         yarnItems={yarnItems}
         transactionCards={transactionCards}
         pagination={pagination}
+        metrics={metrics}
         filters={{
           supplierId,
           itemId,

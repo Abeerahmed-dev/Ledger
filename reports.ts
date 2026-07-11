@@ -80,6 +80,23 @@ export async function getMakerReconciliation(makerIdInput: string) {
     outstandingApBalance = totalCredits - totalDebits;
   }
 
+  const advanceAccount = await prisma.chartOfAccounts.findUnique({
+    where: { code: '1300' },
+  });
+  if (advanceAccount) {
+    const advSum = await prisma.financialLedger.aggregate({
+      where: {
+        accountId: advanceAccount.id,
+        transaction: { reference: makerId },
+      },
+      _sum: { debit: true, credit: true },
+    });
+    const totalAdvDebits = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+    const totalAdvCredits = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+    const advanceBalance = totalAdvDebits - totalAdvCredits; // Asset is debit-normal
+    outstandingApBalance = outstandingApBalance - advanceBalance;
+  }
+
   // 4. Historical wastage percentage from WastageLog is removed
   const historicalWastagePercentage = 0;
 
@@ -310,6 +327,10 @@ export async function getSupplierLedger() {
     where: { code: '2100' },
   });
 
+  const advanceAccount = await prisma.chartOfAccounts.findUnique({
+    where: { code: '1300' },
+  });
+
   for (const s of suppliers) {
     const qtySum = await prisma.purchaseLine.aggregate({
       where: { purchaseInvoice: { supplierId: s.id } },
@@ -324,11 +345,42 @@ export async function getSupplierLedger() {
         where: {
           accountId: apAccount.id,
           debit: { gt: 0 },
-          transaction: { reference: s.id },
+          transaction: {
+            reference: s.id,
+            description: { startsWith: 'Outbound Payment' },
+          },
         },
         _sum: { debit: true },
       });
       totalPaid = paidSum._sum.debit ? Number(paidSum._sum.debit) : 0;
+    }
+
+    let apBalance = 0;
+    if (apAccount) {
+      const apSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: apAccount.id,
+          transaction: { reference: s.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = apSum._sum.debit ? Number(apSum._sum.debit) : 0;
+      const credit = apSum._sum.credit ? Number(apSum._sum.credit) : 0;
+      apBalance = credit - debit;
+    }
+
+    let advanceBalance = 0;
+    if (advanceAccount) {
+      const advSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          transaction: { reference: s.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+      const credit = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+      advanceBalance = debit - credit;
     }
 
     ledger.push({
@@ -337,7 +389,7 @@ export async function getSupplierLedger() {
       totalLbs,
       totalBilled,
       totalPaid,
-      balance: totalBilled - totalPaid, // AP Balance
+      balance: apBalance - advanceBalance,
     });
   }
   return ledger;
@@ -354,6 +406,10 @@ export async function getMakerLedger() {
   const ledger = [];
   const apAccount = await prisma.chartOfAccounts.findUnique({
     where: { code: '2100' },
+  });
+
+  const advanceAccount = await prisma.chartOfAccounts.findUnique({
+    where: { code: '1300' },
   });
 
   for (const m of makers) {
@@ -397,11 +453,42 @@ export async function getMakerLedger() {
         where: {
           accountId: apAccount.id,
           debit: { gt: 0 },
-          transaction: { reference: m.id },
+          transaction: {
+            reference: m.id,
+            description: { startsWith: 'Outbound Payment' },
+          },
         },
         _sum: { debit: true },
       });
       totalPaid = paidSum._sum.debit ? Number(paidSum._sum.debit) : 0;
+    }
+
+    let apBalance = 0;
+    if (apAccount) {
+      const apSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: apAccount.id,
+          transaction: { reference: m.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = apSum._sum.debit ? Number(apSum._sum.debit) : 0;
+      const credit = apSum._sum.credit ? Number(apSum._sum.credit) : 0;
+      apBalance = credit - debit;
+    }
+
+    let advanceBalance = 0;
+    if (advanceAccount) {
+      const advSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          transaction: { reference: m.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+      const credit = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+      advanceBalance = debit - credit;
     }
 
     ledger.push({
@@ -411,7 +498,7 @@ export async function getMakerLedger() {
       totalShirts,
       totalBilled,
       totalPaid,
-      balance: totalBilled - totalPaid,
+      balance: apBalance - advanceBalance,
       wastagePercentage: recon.historicalWastagePercentage,
     });
   }
@@ -431,6 +518,10 @@ export async function getCustomerLedger() {
     where: { code: '1200' },
   });
 
+  const advanceAccount = await prisma.chartOfAccounts.findUnique({
+    where: { code: '2200' },
+  });
+
   for (const c of companies) {
     const sales = await prisma.salesLine.aggregate({
       where: { salesInvoice: { customerId: c.id } },
@@ -445,11 +536,42 @@ export async function getCustomerLedger() {
         where: {
           accountId: arAccount.id,
           credit: { gt: 0 },
-          transaction: { reference: c.id },
+          transaction: {
+            reference: c.id,
+            description: { startsWith: 'Inbound Payment' },
+          },
         },
         _sum: { credit: true },
       });
       totalReceived = receivedSum._sum.credit ? Number(receivedSum._sum.credit) : 0;
+    }
+
+    let arBalance = 0;
+    if (arAccount) {
+      const arSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: arAccount.id,
+          transaction: { reference: c.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = arSum._sum.debit ? Number(arSum._sum.debit) : 0;
+      const credit = arSum._sum.credit ? Number(arSum._sum.credit) : 0;
+      arBalance = debit - credit;
+    }
+
+    let advanceBalance = 0;
+    if (advanceAccount) {
+      const advSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          transaction: { reference: c.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+      const credit = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+      advanceBalance = credit - debit; // Liability is credit normal
     }
 
     ledger.push({
@@ -458,7 +580,7 @@ export async function getCustomerLedger() {
       totalShirts,
       totalRevenue,
       totalReceived,
-      balance: totalRevenue - totalReceived,
+      balance: arBalance - advanceBalance,
     });
   }
   return ledger;

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { fireWebhook } from './webhooks';
 import { generateInvoicePdfBuffer } from './invoicePdf';
 import { prisma, basePrisma, PRISMA_TRANSACTION_OPTIONS } from './db';
+import { revalidatePath } from 'next/cache';
 
 // ==========================================
 // Zod Validation Schemas
@@ -49,6 +50,23 @@ const GenerateDeliveryInvoiceSchema = z.object({
 // Transaction Actions
 // ==========================================
 
+async function getOrCreateAccount(
+  tx: Prisma.TransactionClient,
+  code: string,
+  name: string,
+  type: 'ASSET' | 'LIABILITY' | 'EQUITY' | 'REVENUE' | 'EXPENSE'
+) {
+  let account = await tx.chartOfAccounts.findUnique({
+    where: { code },
+  });
+  if (!account) {
+    account = await tx.chartOfAccounts.create({
+      data: { code, name, type },
+    });
+  }
+  return account;
+}
+
 /**
  * Action 1: Procure Raw Material (Yarn in lbs)
  * Adds yarn to the Inventory Ledger (Main Warehouse),
@@ -59,7 +77,7 @@ export async function procureRawMaterial(input: unknown) {
   const totalPrice = validated.totalAmount;
   const unitPrice = validated.totalAmount / validated.quantityInKg;
 
-  return await basePrisma.$transaction(async (tx) => {
+  const result = await basePrisma.$transaction(async (tx) => {
     // 1. Verify supplier entity exists and is correct type
     const supplier = await tx.entity.findUnique({
       where: { id: validated.supplierId },
@@ -136,6 +154,21 @@ export async function procureRawMaterial(input: unknown) {
       },
     });
 
+    // Query Advance Paid (1300) balance for this supplier
+    const advanceAccount = await getOrCreateAccount(tx, '1300', 'Advance Paid to Maker/Supplier', 'ASSET');
+    const advLines = await tx.financialLedger.aggregate({
+      where: {
+        accountId: advanceAccount.id,
+        transaction: { reference: validated.supplierId },
+      },
+      _sum: { debit: true, credit: true },
+    });
+    const totalAdvDebits = advLines._sum.debit ? Number(advLines._sum.debit) : 0;
+    const totalAdvCredits = advLines._sum.credit ? Number(advLines._sum.credit) : 0;
+    const advanceBalance = Math.max(0, totalAdvDebits - totalAdvCredits); // Asset is debit-normal
+
+    const consumedAmount = Math.min(totalPrice, advanceBalance);
+
     // 7. Record financial double-entry transaction
     const finTx = await tx.financialTransaction.create({
       data: {
@@ -154,6 +187,18 @@ export async function procureRawMaterial(input: unknown) {
               debit: 0,
               credit: totalPrice,
             },
+            ...(consumedAmount > 0 ? [
+              {
+                accountId: accountsPayableAccount.id,
+                debit: consumedAmount,
+                credit: 0,
+              },
+              {
+                accountId: advanceAccount.id,
+                debit: 0,
+                credit: consumedAmount,
+              }
+            ] : [])
           ],
         },
       },
@@ -172,6 +217,12 @@ export async function procureRawMaterial(input: unknown) {
       financialTransactionId: finTx.id,
     };
   }, PRISMA_TRANSACTION_OPTIONS);
+
+  revalidatePath('/dashboard/suppliers');
+  revalidatePath('/dashboard/makers');
+  revalidatePath('/dashboard/companies');
+
+  return result;
 }
 
 /**
@@ -182,7 +233,7 @@ export async function procureRawMaterial(input: unknown) {
 export async function transferToMaker(input: unknown) {
   const validated = TransferToMakerSchema.parse(input);
 
-  return await basePrisma.$transaction(async (tx) => {
+  const result = await basePrisma.$transaction(async (tx) => {
     // 1. Verify maker entity exists and is correct type
     const maker = await tx.entity.findUnique({
       where: { id: validated.makerId },
@@ -285,6 +336,12 @@ export async function transferToMaker(input: unknown) {
       issueLineId: ledgerEntry.id,
     };
   }, PRISMA_TRANSACTION_OPTIONS);
+
+  revalidatePath('/dashboard/suppliers');
+  revalidatePath('/dashboard/makers');
+  revalidatePath('/dashboard/companies');
+
+  return result;
 }
 
 /**
@@ -426,6 +483,21 @@ export async function receiveFinishedGoods(input: unknown) {
       },
     });
 
+    // Query Advance Paid (1300) balance for this maker
+    const advanceAccount = await getOrCreateAccount(tx, '1300', 'Advance Paid to Maker/Supplier', 'ASSET');
+    const advLines = await tx.financialLedger.aggregate({
+      where: {
+        accountId: advanceAccount.id,
+        transaction: { reference: validated.makerId },
+      },
+      _sum: { debit: true, credit: true },
+    });
+    const totalAdvDebits = advLines._sum.debit ? Number(advLines._sum.debit) : 0;
+    const totalAdvCredits = advLines._sum.credit ? Number(advLines._sum.credit) : 0;
+    const advanceBalance = Math.max(0, totalAdvDebits - totalAdvCredits); // Asset is debit-normal
+
+    const consumedAmount = Math.min(validated.serviceCost, advanceBalance);
+
     // 7. Record financial double-entry transaction
     const finTx = await tx.financialTransaction.create({
       data: {
@@ -445,16 +517,29 @@ export async function receiveFinishedGoods(input: unknown) {
               credit: validated.serviceCost,
               orderNumber: validated.orderNumber || null,
             },
+            ...(consumedAmount > 0 ? [
+              {
+                accountId: accountsPayableAccount.id,
+                debit: consumedAmount,
+                credit: 0,
+                orderNumber: validated.orderNumber || null,
+              },
+              {
+                accountId: advanceAccount.id,
+                debit: 0,
+                credit: consumedAmount,
+                orderNumber: validated.orderNumber || null,
+              }
+            ] : [])
           ],
         },
       },
     });
 
-    // 8. Log activity
     await tx.activityLog.create({
       data: {
         actionType: 'GOODS_RECEIVED',
-        description: `Received ${validated.finishedGoodsQuantityReceived} shirts from ${maker.name} (Order: ${validated.orderNumber || 'N/A'})`,
+        description: `Received ${validated.finishedGoodsQuantityReceived} pcs of ${finishedGoodsItem.name} from ${maker.name} (Consumed ${validated.rawMaterialQuantityConsumed} lbs yarn) (Order: ${validated.orderNumber || 'N/A'})`,
         orderNumber: validated.orderNumber || null,
       },
     });
@@ -466,6 +551,10 @@ export async function receiveFinishedGoods(input: unknown) {
       makerName: maker.name,
     };
   }, PRISMA_TRANSACTION_OPTIONS);
+
+  revalidatePath('/dashboard/suppliers');
+  revalidatePath('/dashboard/makers');
+  revalidatePath('/dashboard/companies');
 
   return {
     receiptLineId: receiptResult.receiptLineId,
@@ -608,6 +697,21 @@ export async function generateDeliveryInvoice(input: unknown) {
       },
     });
 
+    // Query Advance Received (2200) balance for this company
+    const advanceAccount = await getOrCreateAccount(tx, '2200', 'Advance Received from Company', 'LIABILITY');
+    const advLines = await tx.financialLedger.aggregate({
+      where: {
+        accountId: advanceAccount.id,
+        transaction: { reference: validated.companyId },
+      },
+      _sum: { debit: true, credit: true },
+    });
+    const totalAdvDebits = advLines._sum.debit ? Number(advLines._sum.debit) : 0;
+    const totalAdvCredits = advLines._sum.credit ? Number(advLines._sum.credit) : 0;
+    const advanceBalance = Math.max(0, totalAdvCredits - totalAdvDebits); // Liability is credit-normal
+
+    const consumedAmount = Math.min(totalPrice, advanceBalance);
+
     // 10. Record financial double-entry transaction using GST-inclusive total
     const finTx = await tx.financialTransaction.create({
       data: {
@@ -628,6 +732,20 @@ export async function generateDeliveryInvoice(input: unknown) {
               credit: totalPrice,
               orderNumber: validated.jobNumber || null,
             },
+            ...(consumedAmount > 0 ? [
+              {
+                accountId: advanceAccount.id,
+                debit: consumedAmount,
+                credit: 0,
+                orderNumber: validated.jobNumber || null,
+              },
+              {
+                accountId: accountsReceivableAccount.id,
+                debit: 0,
+                credit: consumedAmount,
+                orderNumber: validated.jobNumber || null,
+              }
+            ] : [])
           ],
         },
       },
@@ -685,6 +803,10 @@ export async function generateDeliveryInvoice(input: unknown) {
     console.error('Failed to generate PDF buffer:', err);
   }
 
+  revalidatePath('/dashboard/suppliers');
+  revalidatePath('/dashboard/makers');
+  revalidatePath('/dashboard/companies');
+
   return {
     ...invoiceResult,
     pdfBase64,
@@ -699,7 +821,7 @@ export async function generateDeliveryInvoice(input: unknown) {
 export async function reverseTransaction(originalTransactionId: string) {
   const originalTxId = z.string().uuid().parse(originalTransactionId);
 
-  return await basePrisma.$transaction(async (tx) => {
+  const result = await basePrisma.$transaction(async (tx) => {
     // 1. Fetch original transaction details
     const originalTx = await tx.financialTransaction.findUnique({
       where: { id: originalTxId },
@@ -791,6 +913,12 @@ export async function reverseTransaction(originalTransactionId: string) {
       reversedInventoryCount: inventoryEntries.length,
     };
   }, PRISMA_TRANSACTION_OPTIONS);
+
+  revalidatePath('/dashboard/suppliers');
+  revalidatePath('/dashboard/makers');
+  revalidatePath('/dashboard/companies');
+
+  return result;
 }
 
 // ==========================================
@@ -811,7 +939,7 @@ export const RecordPaymentSchema = z.object({
 export async function recordPayment(input: unknown) {
   const validated = RecordPaymentSchema.parse(input);
 
-  return await basePrisma.$transaction(async (tx) => {
+  const result = await basePrisma.$transaction(async (tx) => {
     // 1. Verify entity exists. Note: Payments are allowed even if the current entity's
     // outstanding balance is 0, or if the payment amount exceeds the current balance,
     // which naturally results in negative ledger balances (advances).
@@ -843,23 +971,86 @@ export async function recordPayment(input: unknown) {
       ? `Outbound Payment to ${entity.name} (${entity.type})`
       : `Inbound Payment from ${entity.name} (${entity.type})`;
 
+    let linesToCreate = [
+      {
+        accountId: cashAccount.id,
+        debit: validated.paymentType === 'INBOUND' ? validated.amount : 0,
+        credit: validated.paymentType === 'OUTBOUND' ? validated.amount : 0,
+      }
+    ];
+
+    if (validated.paymentType === 'OUTBOUND') {
+      // Outbound to Maker/Supplier: Check current AP debt
+      const apLines = await tx.financialLedger.aggregate({
+        where: {
+          accountId: offsetAccount.id,
+          transaction: { reference: entity.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const totalDebits = apLines._sum.debit ? Number(apLines._sum.debit) : 0;
+      const totalCredits = apLines._sum.credit ? Number(apLines._sum.credit) : 0;
+      const apDebt = Math.max(0, totalCredits - totalDebits);
+
+      const paidAgainstDebt = Math.min(validated.amount, apDebt);
+      const advanceAmount = validated.amount - paidAgainstDebt;
+
+      if (paidAgainstDebt > 0) {
+        linesToCreate.push({
+          accountId: offsetAccount.id,
+          debit: paidAgainstDebt,
+          credit: 0,
+        });
+      }
+
+      if (advanceAmount > 0) {
+        const advanceAccount = await getOrCreateAccount(tx, '1300', 'Advance Paid to Maker/Supplier', 'ASSET');
+        linesToCreate.push({
+          accountId: advanceAccount.id,
+          debit: advanceAmount,
+          credit: 0,
+        });
+      }
+    } else {
+      // Inbound from Company: Check current AR debt
+      const arLines = await tx.financialLedger.aggregate({
+        where: {
+          accountId: offsetAccount.id,
+          transaction: { reference: entity.id },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const totalDebits = arLines._sum.debit ? Number(arLines._sum.debit) : 0;
+      const totalCredits = arLines._sum.credit ? Number(arLines._sum.credit) : 0;
+      const arDebt = Math.max(0, totalDebits - totalCredits);
+
+      const paidAgainstDebt = Math.min(validated.amount, arDebt);
+      const advanceAmount = validated.amount - paidAgainstDebt;
+
+      if (paidAgainstDebt > 0) {
+        linesToCreate.push({
+          accountId: offsetAccount.id,
+          debit: 0,
+          credit: paidAgainstDebt,
+        });
+      }
+
+      if (advanceAmount > 0) {
+        const advanceAccount = await getOrCreateAccount(tx, '2200', 'Advance Received from Company', 'LIABILITY');
+        linesToCreate.push({
+          accountId: advanceAccount.id,
+          debit: 0,
+          credit: advanceAmount,
+        });
+      }
+    }
+
     const finTx = await tx.financialTransaction.create({
       data: {
         description,
         reference: entity.id,
         lines: {
-          create: [
-            {
-              accountId: cashAccount.id,
-              debit: validated.paymentType === 'INBOUND' ? validated.amount : 0,
-              credit: validated.paymentType === 'OUTBOUND' ? validated.amount : 0,
-            },
-            {
-              accountId: offsetAccount.id,
-              debit: validated.paymentType === 'OUTBOUND' ? validated.amount : 0,
-              credit: validated.paymentType === 'INBOUND' ? validated.amount : 0,
-            },
-          ],
+          create: linesToCreate,
         },
       },
     });
@@ -880,6 +1071,12 @@ export async function recordPayment(input: unknown) {
       paymentType: validated.paymentType,
     };
   }, PRISMA_TRANSACTION_OPTIONS);
+
+  revalidatePath('/dashboard/suppliers');
+  revalidatePath('/dashboard/makers');
+  revalidatePath('/dashboard/companies');
+
+  return result;
 }
 
 // ==========================================

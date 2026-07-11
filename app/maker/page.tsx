@@ -2,6 +2,7 @@ import React from 'react';
 import { prisma } from '../../db';
 import { MakerForm } from './MakerForm';
 import { getInventoryPosition } from '../../reports';
+import { getActiveMakerOrders } from './makerServerActions';
 
 export const revalidate = 0; // Dynamic server component
 
@@ -79,6 +80,7 @@ export default async function MakerPage() {
           makers={makers}
           rawItems={rawItems}
           finishedItems={finishedItems}
+          getActiveMakerOrders={getActiveMakerOrders}
         />
       </div>
     </div>

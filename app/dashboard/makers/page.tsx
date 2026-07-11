@@ -31,6 +31,12 @@ export default async function MakerLedgerPage({ searchParams }: PageProps) {
   let jwoOptions: any[] = [];
   let jobWorkOrders: any[] = [];
   let pagination = paginateArray([], page, DEFAULT_PAGE_SIZE).meta;
+  let metrics = {
+    totalBilled: 0,
+    totalPaid: 0,
+    advancePaid: 0,
+    remaining: 0,
+  };
 
   try {
     // 1. Fetch makers for dropdown
@@ -63,12 +69,14 @@ export default async function MakerLedgerPage({ searchParams }: PageProps) {
     }));
 
     // 3. Fetch Maker Activity Logs & construct Job Cards dynamically
+    const selectedMaker = makerId ? makersList.find(m => m.id === makerId) : null;
     const logs = await prisma.activityLog.findMany({
       where: {
         actionType: { in: ['MAKER_TRANSFER', 'GOODS_RECEIVED'] },
         AND: [
           { orderNumber: { not: null } },
-          { orderNumber: { not: '' } }
+          { orderNumber: { not: '' } },
+          selectedMaker ? { description: { contains: selectedMaker.name } } : {}
         ]
       },
       orderBy: { timestamp: 'desc' },
@@ -109,15 +117,36 @@ export default async function MakerLedgerPage({ searchParams }: PageProps) {
 
       // Quantities
       let yarnIssuedLbs = 0;
+      let yarnConsumedLbs = 0;
       let shirtsReceivedPcs = 0;
+      const receivedItems: { itemName: string; quantity: number }[] = [];
 
       for (const log of jobLogs) {
         if (log.actionType === 'MAKER_TRANSFER') {
           const qtyMatch = log.description.match(/Issued (\d+(?:\.\d+)*) lbs/i);
           if (qtyMatch) yarnIssuedLbs += parseFloat(qtyMatch[1]);
         } else if (log.actionType === 'GOODS_RECEIVED') {
-          const qtyMatch = log.description.match(/Received (\d+(?:\.\d+)*) shirts/i);
-          if (qtyMatch) shirtsReceivedPcs += parseFloat(qtyMatch[1]);
+          const qtyMatch = log.description.match(/Received (\d+(?:\.\d+)*) (?:pcs of (.+?)|shirts) from/i);
+          if (qtyMatch) {
+            const qty = parseFloat(qtyMatch[1]);
+            const itemName = qtyMatch[2] ? qtyMatch[2].trim() : 'Finished Shirts';
+            shirtsReceivedPcs += qty;
+
+            const existing = receivedItems.find(i => i.itemName === itemName);
+            if (existing) {
+              existing.quantity += qty;
+            } else {
+              receivedItems.push({ itemName, quantity: qty });
+            }
+          }
+
+          const consumedMatch = log.description.match(/Consumed (\d+(?:\.\d+)*) lbs/i);
+          if (consumedMatch) {
+            yarnConsumedLbs += parseFloat(consumedMatch[1]);
+          } else {
+            // Fallback: if there's a receipt log without a Consumed tag, assume full consumption
+            yarnConsumedLbs = yarnIssuedLbs;
+          }
         }
       }
 
@@ -135,10 +164,11 @@ export default async function MakerLedgerPage({ searchParams }: PageProps) {
 
       const laborCost = ledgerLines.reduce((sum, l) => sum + Number(l.credit), 0);
 
-      // Determine statuses
-      const hasReceipt = jobLogs.some(l => l.actionType === 'GOODS_RECEIVED');
-      const status = hasReceipt ? 'COMPLETED' : 'OPEN';
-      const materialStatus = hasReceipt ? 'Returned' : 'Pending Shirts';
+      // Determine statuses based on yarn balance remaining
+      const yarnRemaining = Math.max(0, yarnIssuedLbs - yarnConsumedLbs);
+      const isClosed = yarnRemaining <= 0.0001 && jobLogs.some(l => l.actionType === 'GOODS_RECEIVED');
+      const status = isClosed ? 'COMPLETED' : 'OPEN';
+      const materialStatus = isClosed ? 'Returned' : 'Pending Shirts';
       const jobDate = jobLogs[jobLogs.length - 1].timestamp.toISOString().split('T')[0];
 
       cardsList.push({
@@ -152,7 +182,81 @@ export default async function MakerLedgerPage({ searchParams }: PageProps) {
         yarnIssuedLbs: yarnIssuedLbs,
         shirtsReceivedPcs: shirtsReceivedPcs,
         laborCost: laborCost,
+        receivedItems,
       });
+    }
+
+    // Calculate the 4 metrics via Prisma aggregations
+    const apAccount = await prisma.chartOfAccounts.findUnique({
+      where: { code: '2100' },
+    });
+    const advanceAccount = await prisma.chartOfAccounts.findUnique({
+      where: { code: '1300' },
+    });
+
+    metrics = {
+      totalBilled: 0,
+      totalPaid: 0,
+      advancePaid: 0,
+      remaining: 0,
+    };
+
+    if (apAccount) {
+      const billedSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: apAccount.id,
+          credit: { gt: 0 },
+          transaction: makerId ? { reference: makerId } : {
+            reference: { in: makersList.map((m) => m.id) }
+          },
+        },
+        _sum: { credit: true },
+      });
+      metrics.totalBilled = billedSum._sum.credit ? Number(billedSum._sum.credit) : 0;
+
+      const paidSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: apAccount.id,
+          debit: { gt: 0 },
+          transaction: {
+            reference: makerId ? makerId : { in: makersList.map((m) => m.id) },
+            description: { startsWith: 'Outbound Payment' },
+          },
+        },
+        _sum: { debit: true },
+      });
+      metrics.totalPaid = paidSum._sum.debit ? Number(paidSum._sum.debit) : 0;
+    }
+
+    if (advanceAccount) {
+      const advSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          transaction: makerId ? { reference: makerId } : {
+            reference: { in: makersList.map((m) => m.id) }
+          },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+      const credit = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+      metrics.advancePaid = Math.max(0, debit - credit);
+
+      const consumedSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          credit: { gt: 0 },
+          transaction: makerId ? { reference: makerId } : {
+            reference: { in: makersList.map((m) => m.id) }
+          },
+        },
+        _sum: { credit: true },
+      });
+      const consumedAdvances = consumedSum._sum.credit ? Number(consumedSum._sum.credit) : 0;
+
+      metrics.remaining = Math.max(0, (metrics.totalBilled - metrics.totalPaid) - consumedAdvances);
+    } else {
+      metrics.remaining = Math.max(0, metrics.totalBilled - metrics.totalPaid);
     }
 
     // Filter jobs
@@ -200,6 +304,7 @@ export default async function MakerLedgerPage({ searchParams }: PageProps) {
           jwoOptions={jwoOptions}
           jobWorkOrders={jobWorkOrders}
           pagination={pagination}
+          metrics={metrics}
           filters={{
             makerId,
             jwoId,

@@ -31,6 +31,12 @@ export default async function CompanyLedgerPage({ searchParams }: PageProps) {
   let uniqueJobNumbers: any[] = [];
   let transactionCards: any[] = [];
   let pagination = paginateArray([], page, DEFAULT_PAGE_SIZE).meta;
+  let metrics = {
+    totalBilled: 0,
+    totalPaid: 0,
+    advancePaid: 0,
+    remaining: 0,
+  };
 
   try {
     // 1. Fetch companies list
@@ -128,8 +134,45 @@ export default async function CompanyLedgerPage({ searchParams }: PageProps) {
       };
     });
 
+    // Group mappedInvoices by invoiceNumber + date to consolidate deliveries under the same bill
+    const groupedInvoices: { [key: string]: typeof mappedInvoices } = {};
+    for (const inv of mappedInvoices) {
+      const key = `${inv.invoiceNumber}_${inv.date}`;
+      if (!groupedInvoices[key]) {
+        groupedInvoices[key] = [];
+      }
+      groupedInvoices[key].push(inv);
+    }
+
+    const consolidatedInvoices = Object.entries(groupedInvoices).map(([key, group]) => {
+      const first = group[0];
+      const totalQty = group.reduce((sum, item) => sum + item.quantity, 0);
+      const totalPrice = group.reduce((sum, item) => sum + item.totalPrice, 0);
+
+      // Distinct items description or name
+      const distinctItems = [...new Set(group.map((item) => item.itemName))];
+      const itemName = distinctItems.join(', ');
+
+      return {
+        id: first.id,
+        invoiceNumber: first.invoiceNumber,
+        customerId: first.customerId,
+        customerName: first.customerName,
+        date: first.date,
+        poNumber: first.poNumber,
+        jobNumber: first.jobNumber,
+        paymentTerms: first.paymentTerms,
+        shippingMethod: first.shippingMethod,
+        itemName: itemName,
+        sku: first.sku,
+        quantity: totalQty,
+        totalPrice: totalPrice,
+        paymentStatus: first.paymentStatus,
+      };
+    });
+
     // Sort cards descending for presentation
-    let allCards = [...mappedInvoices];
+    let allCards = [...consolidatedInvoices];
     allCards.sort((a, b) => b.date.localeCompare(a.date));
 
     // Apply filters
@@ -141,6 +184,76 @@ export default async function CompanyLedgerPage({ searchParams }: PageProps) {
     }
     if (status) {
       allCards = allCards.filter((c) => c.paymentStatus === status);
+    }
+
+    // Calculate the 4 metrics via Prisma aggregations for the selected Company
+    const advanceAccount = await prisma.chartOfAccounts.findUnique({
+      where: { code: '2200' },
+    });
+
+    metrics = {
+      totalBilled: 0,
+      totalPaid: 0,
+      advancePaid: 0,
+      remaining: 0,
+    };
+
+    if (arAccount) {
+      const billedSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: arAccount.id,
+          debit: { gt: 0 },
+          transaction: companyId ? { reference: companyId } : {
+            reference: { in: companiesList.map((c) => c.id) }
+          },
+        },
+        _sum: { debit: true },
+      });
+      metrics.totalBilled = billedSum._sum.debit ? Number(billedSum._sum.debit) : 0;
+
+      const paidSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: arAccount.id,
+          credit: { gt: 0 },
+          transaction: {
+            reference: companyId ? companyId : { in: companiesList.map((c) => c.id) },
+            description: { startsWith: 'Inbound Payment' },
+          },
+        },
+        _sum: { credit: true },
+      });
+      metrics.totalPaid = paidSum._sum.credit ? Number(paidSum._sum.credit) : 0;
+    }
+
+    if (advanceAccount) {
+      const advSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          transaction: companyId ? { reference: companyId } : {
+            reference: { in: companiesList.map((c) => c.id) }
+          },
+        },
+        _sum: { debit: true, credit: true },
+      });
+      const debit = advSum._sum.debit ? Number(advSum._sum.debit) : 0;
+      const credit = advSum._sum.credit ? Number(advSum._sum.credit) : 0;
+      metrics.advancePaid = Math.max(0, credit - debit);
+
+      const consumedSum = await prisma.financialLedger.aggregate({
+        where: {
+          accountId: advanceAccount.id,
+          debit: { gt: 0 },
+          transaction: companyId ? { reference: companyId } : {
+            reference: { in: companiesList.map((c) => c.id) }
+          },
+        },
+        _sum: { debit: true },
+      });
+      const consumedAdvances = consumedSum._sum.debit ? Number(consumedSum._sum.debit) : 0;
+
+      metrics.remaining = Math.max(0, (metrics.totalBilled - metrics.totalPaid) - consumedAdvances);
+    } else {
+      metrics.remaining = Math.max(0, metrics.totalBilled - metrics.totalPaid);
     }
 
     const paged = paginateArray(allCards, page, DEFAULT_PAGE_SIZE);
@@ -186,6 +299,7 @@ export default async function CompanyLedgerPage({ searchParams }: PageProps) {
         jobNumbers={uniqueJobNumbers}
         transactionCards={transactionCards}
         pagination={pagination}
+        metrics={metrics}
         filters={{
           companyId,
           jwoNumber,

@@ -5,7 +5,6 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useRouter } from 'next/navigation';
-
 // ==========================================
 // Zod Validation Schemas
 // ==========================================
@@ -24,7 +23,7 @@ const receiveSchema = z.object({
   finishedGoodsItemId: z.string().uuid('Please select a valid shirt item'),
   finishedGoodsQuantityReceived: z.number().positive('Received quantity must be greater than 0'),
   makingChargePerShirt: z.number().positive('Making charge must be greater than 0'),
-  orderNumber: z.string().optional(),
+  orderNumber: z.string().min(1, 'Please select an active order number'),
 });
 
 type SendInputs = z.infer<typeof sendSchemaBase>;
@@ -34,9 +33,10 @@ interface Props {
   makers: { id: string; name: string }[];
   rawItems: { id: string; name: string; sku: string; availableStock: number }[];
   finishedItems: { id: string; name: string; sku: string }[];
+  getActiveMakerOrders: (makerId: string) => Promise<string[]>;
 }
 
-export function MakerForm({ makers, rawItems, finishedItems }: Props) {
+export function MakerForm({ makers, rawItems, finishedItems, getActiveMakerOrders }: Props) {
   const router = useRouter();
 
   // Active Main Tab: 'send' | 'receive'
@@ -63,6 +63,9 @@ export function MakerForm({ makers, rawItems, finishedItems }: Props) {
   const [recLoading, setRecLoading] = useState(false);
   const [recFeedback, setRecFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
+  const [activeOrders, setActiveOrders] = useState<string[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+
   // Form hooks
   const sendForm = useForm<SendInputs>({ resolver: zodResolver(sendSchema) });
   const receiveForm = useForm<ReceiveInputs>({ resolver: zodResolver(receiveSchema) });
@@ -76,6 +79,25 @@ export function MakerForm({ makers, rawItems, finishedItems }: Props) {
   const watchRecFinId = receiveForm.watch('finishedGoodsItemId');
   const watchRecRawQty = receiveForm.watch('rawMaterialQuantityConsumed');
   const watchRecOrderNo = receiveForm.watch('orderNumber');
+
+  React.useEffect(() => {
+    if (!watchRecMakerId) {
+      setActiveOrders([]);
+      return;
+    }
+    setLoadingOrders(true);
+    getActiveMakerOrders(watchRecMakerId)
+      .then((orders) => {
+        setActiveOrders(orders);
+      })
+      .catch((err) => {
+        console.error('Error fetching maker orders:', err);
+        setActiveOrders([]);
+      })
+      .finally(() => {
+        setLoadingOrders(false);
+      });
+  }, [watchRecMakerId]);
 
   // Handle Transfer submit
   const onSendSubmit = async (data: SendInputs) => {
@@ -351,15 +373,36 @@ export function MakerForm({ makers, rawItems, finishedItems }: Props) {
                   </select>
                 </div>
 
-                {/* Optional Order Number input */}
+                {/* Active Order Number Select */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Order Number (Optional) (Order Number)</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. ORD-1025"
-                    {...receiveForm.register('orderNumber')}
-                    className="block w-full rounded-2xl border-2 border-slate-200 px-4 py-3 text-base"
-                  />
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Active Order Number (Active Order)</label>
+                  {loadingOrders ? (
+                    <div className="text-xs font-bold text-slate-400 py-3.5 px-4 bg-slate-50 border border-slate-200 rounded-2xl animate-pulse">
+                      Loading active orders...
+                    </div>
+                  ) : (
+                    <select
+                      {...receiveForm.register('orderNumber')}
+                      disabled={!watchRecMakerId || activeOrders.length === 0}
+                      className="block w-full rounded-2xl border-2 border-slate-200 bg-white px-4 py-3.5 text-base font-bold text-slate-950"
+                    >
+                      <option value="">
+                        {!watchRecMakerId 
+                          ? '-- Select Maker First --' 
+                          : activeOrders.length === 0 
+                            ? 'No Active Orders (Issue Yarn First)' 
+                            : '-- Select Active Order --'}
+                      </option>
+                      {activeOrders.map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {receiveForm.formState.errors.orderNumber && (
+                    <p className="mt-2 text-xs text-rose-600 font-bold">{receiveForm.formState.errors.orderNumber.message}</p>
+                  )}
                 </div>
               </div>
             )}
@@ -470,7 +513,7 @@ export function MakerForm({ makers, rawItems, finishedItems }: Props) {
                 type="button"
                 onClick={async () => {
                   if (recStep === 1) {
-                    const ok = await receiveForm.trigger(['makerId']);
+                    const ok = await receiveForm.trigger(['makerId', 'orderNumber']);
                     if (ok) setRecStep(2);
                   } else if (recStep === 2) {
                     const ok = await receiveForm.trigger(['rawMaterialItemId', 'finishedGoodsItemId']);

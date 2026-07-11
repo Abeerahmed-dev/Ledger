@@ -22,7 +22,9 @@ export async function POST() {
       { code: '1000', name: 'Cash', type: 'ASSET' },
       { code: '1100', name: 'Inventory Asset', type: 'ASSET' },
       { code: '1200', name: 'Accounts Receivable', type: 'ASSET' },
+      { code: '1300', name: 'Advance Paid to Maker/Supplier', type: 'ASSET' },
       { code: '2100', name: 'Accounts Payable', type: 'LIABILITY' },
+      { code: '2200', name: 'Advance Received from Company', type: 'LIABILITY' },
       { code: '4100', name: 'Sales Revenue', type: 'REVENUE' },
       { code: '5100', name: 'COGS - Labor', type: 'EXPENSE' },
     ] as const;
